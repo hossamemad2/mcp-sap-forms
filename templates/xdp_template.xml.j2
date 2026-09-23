@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/" timeStamp="{{ timestamp }}">
+  <template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">
+    <subform name="form1" layout="tb" locale="{{ locale }}" restoreState="auto">
+      <pageSet>
+{% for page in pages %}
+        <pageArea name="Page{{ loop.index }}" id="Page{{ loop.index }}">
+          <contentArea x="10mm" y="10mm" w="{{ page.content_w }}mm" h="{{ page.content_h }}mm"/>
+          <medium stock="{{ page.stock }}" short="{{ page.short }}mm" long="{{ page.long }}mm"/>
+        </pageArea>
+{% endfor %}
+      </pageSet>
+{% for page in pages %}
+      <subform name="Page{{ loop.index }}Content" layout="position" w="{{ page.content_w }}mm" h="{{ page.content_h }}mm" locale="{{ page.locale }}">
+        <breakBefore target="#Page{{ loop.index }}" targetType="pageArea"/>
+{% for el in page.elements %}
+{% if el.kind == 'draw' %}
+        <draw name="{{ el.name }}" x="{{ el.x }}mm" y="{{ el.y }}mm" w="{{ el.w }}mm" h="{{ el.h }}mm">
+          <value><text>{{ el.text }}</text></value>
+          <font typeface="{{ el.font }}" size="{{ el.font_size }}pt"{% if el.bold %} weight="bold"{% endif %}{% if el.underline %} underline="1"{% endif %}/>
+          <para hAlign="{{ el.align }}" vAlign="middle"/>
+        </draw>
+{% elif el.kind == 'field' %}
+        <field name="{{ el.name }}" x="{{ el.x }}mm" y="{{ el.y }}mm" w="{{ el.w }}mm" h="{{ el.h }}mm" access="readOnly" locale="{{ el.locale }}">
+          <ui><textEdit multiLine="1"><border presence="hidden"/></textEdit></ui>
+          <value><text/></value>
+          <font typeface="{{ el.font }}" size="{{ el.font_size }}pt"{% if el.bold %} weight="bold"{% endif %}{% if el.underline %} underline="1"{% endif %}/>
+          <para hAlign="{{ el.align }}" vAlign="middle"/>
+          <bind match="dataRef" ref="{{ el.data_ref }}"/>
+        </field>
+{% endif %}
+{% endfor %}
+{% if page.items_table %}
+{% set it = page.items_table %}
+        <subform name="{{ it.name }}" layout="table" x="{{ it.x }}mm" y="{{ it.y }}mm" w="{{ it.w }}mm">
+          <subform name="{{ it.name }}_Hdr" layout="row" h="{{ it.header_h }}mm">
+{% for col in it.columns %}
+            <subform name="{{ it.name }}_Hdr_{{ col.name }}" w="{{ col.w }}mm">
+              <draw name="D_{{ it.name }}_Hdr_{{ col.name }}" w="{{ col.w }}mm" h="{{ it.header_h }}mm">
+                <value><text>{{ col.label }}</text></value>
+                <font typeface="Arial" size="10pt" weight="bold"/>
+                <para hAlign="center" vAlign="middle"/>
+              </draw>
+            </subform>
+{% endfor %}
+          </subform>
+          <subform name="{{ it.name }}_Row" layout="row" h="{{ it.row_h }}mm">
+            <occur max="-1" min="0"/>
+            <bind match="dataRef" ref="{{ it.data_ref }}[*]"/>
+{% for col in it.columns %}
+            <subform name="{{ it.name }}_Row_{{ col.name }}" w="{{ col.w }}mm">
+              <field name="{{ col.name }}" w="{{ col.w }}mm" h="{{ it.row_h }}mm" access="readOnly" locale="{{ it.locale }}">
+                <ui><textEdit multiLine="1"><border presence="hidden"/></textEdit></ui>
+                <value><text/></value>
+                <font typeface="Arial" size="10pt"/>
+                <para hAlign="{{ col.align }}" vAlign="middle"/>
+                <bind match="dataRef" ref="$.{{ col.name }}"/>
+              </field>
+            </subform>
+{% endfor %}
+          </subform>
+        </subform>
+{% endif %}
+      </subform>
+{% endfor %}
+    </subform>
+  </template>
+</xdp:xdp>
