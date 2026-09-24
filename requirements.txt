@@ -7,3 +7,5 @@ openpyxl>=3.1
 jinja2>=3.1
 lxml>=5.2
 pytest>=8.0
+# Optional, only for SAP_TRANSPORT=rfc (needs the SAP NetWeaver RFC SDK installed first):
+# pyrfc

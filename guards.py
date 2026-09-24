@@ -93,3 +93,27 @@ def assert_allowed_adt_path(path: str) -> None:
 def assert_allowed_soap_path(path: str) -> None:
     if path != SOAP_RFC_PATH:
         raise GuardError(f"Refusing SOAP call to '{path}'.")
+
+
+RFC_ALLOWED_FUNCTIONS = ("Z_FP_FORM_DEPLOY",)
+
+
+def assert_allowed_rfc_function(name: str) -> None:
+    if name not in RFC_ALLOWED_FUNCTIONS:
+        raise GuardError(f"Refusing RFC call to '{name}': only {', '.join(RFC_ALLOWED_FUNCTIONS)} may be called.")
+
+
+def validate_deploy_args(mode, interface_name, form_name, devclass, fields):
+    """Shared by the SOAP and native-RFC clients. Returns normalized (interface, form, devclass)."""
+    if mode not in ("CHECK", "DEPLOY"):
+        raise GuardError(f"Invalid mode '{mode}'.")
+    interface_name = assert_custom_name(interface_name, "interface")
+    form_name = assert_custom_name(form_name, "form")
+    if mode == "DEPLOY":
+        devclass = assert_custom_package(devclass)
+    for f in fields:
+        assert_identifier(f["name"], "interface field name")
+        assert_type_expr(f["typename"])
+        if f.get("typing", "TYPE") not in ("TYPE", "LIKE"):
+            raise GuardError(f"Invalid typing '{f.get('typing')}' for field {f['name']}.")
+    return interface_name, form_name, devclass

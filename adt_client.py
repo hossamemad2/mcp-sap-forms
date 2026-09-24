@@ -22,11 +22,11 @@ shows the request; adjust the content-type/attribute constants below.
 from __future__ import annotations
 
 import os
-import requests
 from lxml import etree
 
 import fm_definitions
 import guards
+import sap_transport
 
 ADT_CORE_NS = "http://www.sap.com/adt/core"
 
@@ -35,21 +35,13 @@ class ADTError(Exception):
     pass
 
 
-def _env(name):
-    val = os.environ.get(name)
-    if not val:
-        raise ADTError(f"Missing required environment variable {name}.")
-    return val
-
-
 class ADTClient:
-    def __init__(self, gate, base_url=None, client=None, user=None, password=None, verify_ssl=True):
+    def __init__(self, gate, cfg: "sap_transport.HttpConfig" = None, session=None):
         self.gate = gate
-        self.base_url = (base_url or _env("SAP_BASE_URL")).rstrip("/")
-        self.client = client or os.environ.get("SAP_CLIENT")
-        self.session = requests.Session()
-        self.session.auth = (user or _env("SAP_USER"), password or _env("SAP_PASSWORD"))
-        self.session.verify = verify_ssl
+        self.cfg = cfg or sap_transport.HttpConfig.from_env()
+        self.base_url = self.cfg.base_url
+        self.client = self.cfg.client or None
+        self.session = session or sap_transport.make_session(self.cfg)
         self.csrf_token = None
 
     # -- the single choke point for all SAP traffic ----------------------
@@ -68,7 +60,7 @@ class ADTClient:
         if csrf:
             h["X-CSRF-Token"] = self.csrf_token
         return self.session.request(method, self.base_url + path, params=merged_params,
-                                    headers=h, data=data, timeout=60)
+                                    headers=h, data=data)
 
     def _ensure_csrf(self):
         if self.csrf_token:

@@ -15,24 +15,29 @@ Suggested flow: bootstrap_sap_artifacts (once per system) -> parse_fsd ->
 parse_pdf_layout -> [agent pairs fields to regions] -> ensure_form_types
 (header+items only) -> generate_xdp -> show preview -> deploy_form.
 
-Env: SAP_BASE_URL, SAP_USER, SAP_PASSWORD (+ optional SAP_CLIENT,
-SAP_BOOTSTRAP_PACKAGE, SAP_FORMS_OUT_DIR).
+Connectivity: SAP_TRANSPORT=http (default: SAP_BASE_URL, SAP_USER,
+SAP_PASSWORD, optional SAP_CLIENT) or SAP_TRANSPORT=rfc (SAP_RFC_ASHOST,
+SAP_RFC_SYSNR, SAP_CLIENT, SAP_USER, SAP_PASSWORD, optional SAP_ROUTER_STRING
+for SAProuter). See README "Connecting" and run diagnose_connection first.
+Other optional env: SAP_BOOTSTRAP_PACKAGE, SAP_FORMS_OUT_DIR.
 """
 from __future__ import annotations
 
 import os
 from typing import Optional
-from urllib.parse import urlparse
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 
 import adt_client
+import connectivity
 import fsd_parser
 import guards
 import pdf_layout_parser
+import rfc_client
 import sap_gate
+import sap_transport
 import soap_rfc_client
 import xdp_generator
 
@@ -48,9 +53,22 @@ class _Approval(BaseModel):
 
 
 def _system_label() -> str:
-    url = os.environ.get("SAP_BASE_URL", "")
-    client = os.environ.get("SAP_CLIENT", "")
-    return f"{urlparse(url).netloc or '(SAP_BASE_URL not set)'}" + (f" client {client}" if client else "")
+    return sap_transport.describe_current()
+
+
+def _deploy_client(gate):
+    """Native RFC when SAP_TRANSPORT=rfc, otherwise SOAP-RFC over HTTP. Both are context managers."""
+    if sap_transport.transport_kind() == "rfc":
+        return rfc_client.RfcClient(gate)
+    return soap_rfc_client.SoapRfcClient(gate)
+
+
+def _require_http_transport(tool: str):
+    if sap_transport.transport_kind() != "http":
+        raise sap_transport.SapConnectionError(
+            f"{tool} creates ABAP/DDIC objects through ADT, which needs SAP_TRANSPORT=http. Under "
+            f"SAP_TRANSPORT=rfc only check_form_status, deploy_form and diagnose_connection are available, "
+            f"and Z_FP_FORM_DEPLOY must already exist in SAP.")
 
 
 def _make_approver(ctx: Context):
@@ -70,7 +88,8 @@ async def _with_gate(ctx: Context, work):
         return await anyio.to_thread.run_sync(work, gate)
     except sap_gate.SapCallDenied as e:
         return {"denied": True, "error": str(e)}
-    except (guards.GuardError, adt_client.ADTError, soap_rfc_client.SoapRfcError) as e:
+    except (guards.GuardError, adt_client.ADTError, soap_rfc_client.SoapRfcError,
+            rfc_client.RfcError, sap_transport.SapConnectionError) as e:
         return {"error": str(e)}
 
 
@@ -80,9 +99,24 @@ async def bootstrap_sap_artifacts(ctx: Context) -> dict:
     Creates/updates the dev-only builder tooling (class ZCL_FP_FORM_BUILDER
     + RFC wrapper Z_FP_FORM_DEPLOY) as local objects in $TMP. Makes several
     SAP calls; the user is asked to approve EACH one. If a call is denied,
-    stop and ask the user -- never retry or work around it.
+    stop and ask the user -- never retry or work around it. Needs
+    SAP_TRANSPORT=http (ADT).
     """
-    return await _with_gate(ctx, lambda gate: adt_client.bootstrap(adt_client.ADTClient(gate)))
+    def work(gate):
+        _require_http_transport("bootstrap_sap_artifacts")
+        return adt_client.bootstrap(adt_client.ADTClient(gate))
+    return await _with_gate(ctx, work)
+
+
+@mcp.tool()
+async def diagnose_connection(ctx: Context) -> dict:
+    """
+    Finds where the connection to SAP breaks (config, DNS, TCP, logon/HTTP
+    session) and stops at the first failure with a hint. Works for both
+    transports and both VPN and SAProuter. Each network step is a separate
+    SAP call the user approves; if one is denied, stop and ask the user.
+    """
+    return await _with_gate(ctx, lambda gate: connectivity.diagnose(gate))
 
 
 @mcp.tool()
@@ -116,9 +150,13 @@ async def ensure_form_types(ctx: Context, form_name: str, package: str,
     interface field entries to pass to deploy_form.
     header_fields/item_fields: [{"name": str, "typename": "abap.string"}].
     """
-    return await _with_gate(ctx, lambda gate: adt_client.ADTClient(gate).deploy_header_and_item_types(
-        form_name=form_name, header_fields=header_fields or [], item_fields=item_fields or [],
-        package=package, transport=transport))
+    def work(gate):
+        _require_http_transport("ensure_form_types")
+        return adt_client.ADTClient(gate).deploy_header_and_item_types(
+            form_name=form_name, header_fields=header_fields or [], item_fields=item_fields or [],
+            package=package, transport=transport)
+
+    return await _with_gate(ctx, work)
 
 
 @mcp.tool()
@@ -141,8 +179,11 @@ def generate_xdp(form_name: str, pages: list, locale: str = "en_US") -> dict:
 @mcp.tool()
 async def check_form_status(ctx: Context, interface_name: str, form_name: str) -> dict:
     """Read-only existence check of a Z/Y interface and form. Requires user approval of the SAP call."""
-    return await _with_gate(ctx, lambda gate: soap_rfc_client.SoapRfcClient(gate).check_status(
-        interface_name, form_name))
+    def work(gate):
+        with _deploy_client(gate) as client:
+            return client.check_status(interface_name, form_name)
+
+    return await _with_gate(ctx, work)
 
 
 @mcp.tool()
@@ -166,13 +207,13 @@ async def deploy_form(ctx: Context, interface_name: str, form_name: str, package
         xdp_bytes = f.read()
 
     def work(gate):
-        soap = soap_rfc_client.SoapRfcClient(gate)
-        status = soap.check_status(interface_name, form_name)
-        if status["interface_exists"] or status["form_exists"]:
-            return {"error": f"Already exists (interface_exists={status['interface_exists']}, "
-                             f"form_exists={status['form_exists']}) -- nothing changed."}
-        return soap.deploy(interface_name=interface_name, form_name=form_name, devclass=package,
-                           fields=fields, ordernum=transport, xdp_xstring=xdp_bytes)
+        with _deploy_client(gate) as client:
+            status = client.check_status(interface_name, form_name)
+            if status["interface_exists"] or status["form_exists"]:
+                return {"error": f"Already exists (interface_exists={status['interface_exists']}, "
+                                 f"form_exists={status['form_exists']}) -- nothing changed."}
+            return client.deploy(interface_name=interface_name, form_name=form_name, devclass=package,
+                                 fields=fields, ordernum=transport, xdp_xstring=xdp_bytes)
 
     return await _with_gate(ctx, work)
 

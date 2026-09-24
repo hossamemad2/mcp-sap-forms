@@ -11,7 +11,8 @@ bootstraps its own dev-client-only ABAP tooling via SAP's ADT REST API.
 pip install -r requirements.txt
 ```
 
-Environment variables (read by `adt_client.py` and `soap_rfc_client.py`):
+Environment variables for the default http transport (for `SAP_TRANSPORT=rfc`
+see "Connecting" below):
 
 | Var | Required | Notes |
 |---|---|---|
@@ -22,6 +23,50 @@ Environment variables (read by `adt_client.py` and `soap_rfc_client.py`):
 | `SAP_FORMS_OUT_DIR` | no | where generated `.xdp` files are written |
 
 Register in your MCP client config pointing at `server.py`.
+
+## Connecting: VPN or SAProuter
+
+Pick the transport with `SAP_TRANSPORT`. Run `diagnose_connection` first: it
+walks config -> DNS -> TCP -> logon/HTTP and stops at the first failure with
+a hint (each network step is one approval prompt).
+
+| | VPN (or direct) | SAProuter |
+|---|---|---|
+| **`SAP_TRANSPORT=rfc`** (native RFC) | set the three `SAP_RFC_*` vars, no router string | add `SAP_ROUTER_STRING` |
+| **`SAP_TRANSPORT=http`** (default; ADT + SOAP-RFC) | connect the VPN, set `SAP_BASE_URL` | not supported (see below) |
+
+**RFC transport** (needs the SAP NetWeaver RFC SDK from the SAP Support
+Portal, then `pip install pyrfc`; set `SAPNWRFC_HOME`):
+
+| Var | Notes |
+|---|---|
+| `SAP_RFC_ASHOST` | application server host (behind the router, if any) |
+| `SAP_RFC_SYSNR` | 2-digit instance number, e.g. `00` (gateway port 33`<nn>`) |
+| `SAP_CLIENT` | 3-digit client |
+| `SAP_ROUTER_STRING` | optional; router hops only, e.g. `/H/router.corp/S/3299`. May contain `/P/password`: never logged or shown |
+| `SAP_USER` / `SAP_PASSWORD` | as before |
+
+RFC can only call the already-existing `Z_FP_FORM_DEPLOY`
+(`check_form_status`, `deploy_form`, `diagnose_connection`). It cannot
+create ABAP or DDIC objects, so `bootstrap_sap_artifacts` and
+`ensure_form_types` (ADT) need the http transport, and the one-time setup
+objects must already exist in SAP.
+
+**HTTP transport** extras (all optional): `SAP_CA_BUNDLE` (internal CA
+file), `SAP_VERIFY_SSL=false` (shown in every approval prompt),
+`SAP_TLS_SERVER_NAME` (certificate hostname when you go through a
+tunnel/alias), `SAP_TIMEOUT_CONNECT` (default 10 s) and `SAP_TIMEOUT_READ`
+(default 120 s). Only failures before a request is sent are retried, so a
+create is never duplicated. A read timeout on a write means SAP may have
+processed it: check with `check_form_status` before retrying.
+`requests` can't speak the SAProuter protocol. If only the router reaches
+SAP, use the rfc transport, or run your own port-forward and point
+`SAP_BASE_URL` at `https://localhost:PORT` with `SAP_TLS_SERVER_NAME`.
+
+Tips: run the MCP on the machine that has the VPN (WSL and containers often
+don't inherit VPN routes or split-tunnel DNS); the router's route permission
+table must allow your target host/port; behind a corporate proxy use
+`NO_PROXY` for the SAP host.
 
 ## Safety restrictions (enforced in code)
 

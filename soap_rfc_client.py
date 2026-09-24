@@ -8,40 +8,35 @@ needs to be registered/created. Plain HTTP + hand-built SOAP envelope via
 from __future__ import annotations
 
 import base64
-import os
 from xml.sax.saxutils import escape
 
-import requests
 from lxml import etree
 
 import fm_definitions
 import guards
+import sap_transport
 
 
 class SoapRfcError(Exception):
     pass
 
 
-def _env(name):
-    val = os.environ.get(name)
-    if not val:
-        raise SoapRfcError(f"Missing required environment variable {name}.")
-    return val
-
-
 class SoapRfcClient:
-    def __init__(self, gate, base_url=None, client=None, user=None, password=None, verify_ssl=True):
+    def __init__(self, gate, cfg: "sap_transport.HttpConfig" = None, session=None):
         self.gate = gate
-        self.base_url = (base_url or _env("SAP_BASE_URL")).rstrip("/")
-        self.client = client or os.environ.get("SAP_CLIENT")
-        self.user = user or _env("SAP_USER")
-        self.password = password or _env("SAP_PASSWORD")
-        self.verify_ssl = verify_ssl
+        self.cfg = cfg or sap_transport.HttpConfig.from_env()
+        self.session = session or sap_transport.make_session(self.cfg)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
 
     def _endpoint(self):
-        url = f"{self.base_url}/sap/bc/soap/rfc"
-        if self.client:
-            url += f"?sap-client={self.client}"
+        url = f"{self.cfg.base_url}/sap/bc/soap/rfc"
+        if self.cfg.client:
+            url += f"?sap-client={self.cfg.client}"
         return url
 
     def call_deploy(self, mode, interface_name, form_name, devclass,
@@ -55,15 +50,8 @@ class SoapRfcClient:
         xdp_xstring: raw bytes of the XDP layout (base64-encoded on the wire).
         Returns dict: interface_exists, form_exists, subrc, message.
         """
-        if mode not in ("CHECK", "DEPLOY"):
-            raise guards.GuardError(f"Invalid mode '{mode}'.")
-        interface_name = guards.assert_custom_name(interface_name, "interface")
-        form_name = guards.assert_custom_name(form_name, "form")
-        if mode == "DEPLOY":
-            devclass = guards.assert_custom_package(devclass)
-        for f in fields:
-            guards.assert_identifier(f["name"], "interface field name")
-            guards.assert_type_expr(f["typename"])
+        interface_name, form_name, devclass = guards.validate_deploy_args(
+            mode, interface_name, form_name, devclass, fields)
         guards.assert_allowed_soap_path(guards.SOAP_RFC_PATH)
 
         rows_xml = "".join(
@@ -102,13 +90,10 @@ class SoapRfcClient:
                                     f"{len(fields)} interface field(s), layout {len(xdp_xstring or b'')} bytes; "
                                     f"one call, performs several steps inside SAP via the standard SFP APIs"))
 
-        resp = requests.post(
+        resp = self.session.post(
             self._endpoint(),
             data=body.encode("utf-8"),
             headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'},
-            auth=(self.user, self.password),
-            verify=self.verify_ssl,
-            timeout=120,
         )
         if resp.status_code >= 400:
             raise SoapRfcError(
